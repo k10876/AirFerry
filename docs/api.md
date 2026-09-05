@@ -223,6 +223,27 @@ object ZxingDecoder {
 
 > **线程模型**：`receiverIngest`/`receiverAssembleBytes` 等操作同一原生句柄，**非线程安全**。Android 侧用一把 ingest 锁串行化所有调用，ZXing 解码则在多个 worker 上并行（见 [data-flow.md](data-flow.md)）。
 
+### JNI 发送端（`com.airferry.sender.nativelib.NativeBridge`）
+
+独立 APK `apps/sender-android`。符号在同一 `libtransfer_engine.so`，Kotlin 类名不同所以 JNI 前缀是 `Java_com_airferry_sender_nativelib_NativeBridge_*`。
+
+```kotlin
+object NativeBridge {
+    external fun nativeAbiVersion(): Int
+    external fun segmentRawBytes(): Long
+    external fun contentFingerprint(head: ByteArray, tail: ByteArray): ByteArray
+    external fun deriveSessionId(name: String, size: Long, mtimeMs: Long, fingerprint: ByteArray): LongArray // [lo, hi]
+    external fun sha256(data: ByteArray): ByteArray
+    external fun compressPrepare(raw: ByteArray): ByteArray // [u8 algo][u32le crc][bytes]
+    external fun senderCreate(...): Long
+    external fun senderCreateSegment(...): Long
+    external fun senderNextQr(handle: Long, count: Int): ByteArray? // 与 WASM next_qr_scratch 同布局
+    external fun senderDestroy(handle: Long)
+}
+```
+
+`senderNextQr` 缓冲：`[u32le count][for each: u32le side + side*side modules]`（1=dark / 0=light）。句柄同样非线程安全，播放循环单线程调用。压缩见 `send_prepare.rs`（zstd lv1、70% early-exit、xz 仅 ≤8 MiB）。
+
 ### 进度 JSON 格式
 
 `receiverProgressJson` 返回的 JSON（`receiverIngest` 只返回 packed `Long`）：

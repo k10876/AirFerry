@@ -336,6 +336,9 @@ offset  size   field
 | `receiverAssembleBytes` | `(handle) -> ByteArray?` | **原子返回完整字节**，未完成/失败可为 null（修复了旧 `receiverAssemble(handle,outBuf)` 的 >2GB 截断 + 长度/填充竞态） |
 | `receiverDestroy` | `(handle)` | 释放 |
 | `receiverFileName/FileSize/Crc32/Crc32Known` | `(handle) -> ...` | 文件元数据访问器 |
+| `senderCreate` / `senderCreateSegment` | 见 `docs/api.md` JNI 发送端 | Android 分享发送端（`com.airferry.sender.nativelib.NativeBridge`）；与 WASM `SenderSessionWasm` 同构造参数 |
+| `senderNextQr` | `(handle, count) -> byte[]` | 与 WASM `next_qr_scratch` 相同的 packed 布局；实现在 `qr_pack.rs` |
+| `compressPrepare` | `(raw) -> byte[]` | `[u8 algo][u32le crc32][compressed]`；zstd lv1 + 70% early-exit（`send_prepare.rs`） |
 
 > **线程模型**：上述所有操作同一原生句柄，**非线程安全**。Android 用一把 `ingestLock` 串行化；ZXing 解码在 N 个 worker 上并行。
 

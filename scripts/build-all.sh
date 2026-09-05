@@ -7,6 +7,7 @@ set -euo pipefail
 #   ./scripts/build-all.sh              # 构建全部（发送端 + 扫码端）
 #   ./scripts/build-all.sh sender       # 仅构建浏览器发送端
 #   ./scripts/build-all.sh scanner      # 仅构建 Android 扫码端
+#   ./scripts/build-all.sh sender-android  # 仅构建 Android 分享发送端
 #   ./scripts/build-all.sh windows      # 仅构建 Windows 端（须 Windows + .NET 8 SDK + CMake/VS C++）
 #   ./scripts/build-all.sh wasm         # 仅构建 Rust WASM
 #   ./scripts/build-all.sh dist         # 仅打包：把已构建的产物复制/签名到 dist/
@@ -15,6 +16,7 @@ set -euo pipefail
 #
 # 产物（dist/，均 git-ignored，通过 GitHub Release 分发）:
 #   airferry-receiver-android-arm64-v<VER>.apk  Android 接收端 APK
+#   airferry-sender-android-arm64-v<VER>.apk    Android 分享发送端 APK
 #   airferry-receiver-windows-x64-v<VER>.zip    Windows 接收端（WPF + Rust/ZXing-C++ DLL + OpenCV）
 #   airferry-sender-chrome-mv3-v<VER>.crx       Chrome/Edge MV3（已签名 Cr24）
 #   airferry-sender-chrome-mv3-v<VER>.zip       Chrome/Edge MV3（解压加载回退）
@@ -38,6 +40,7 @@ set -euo pipefail
 #   • 产物统一命名 airferry-<端>-<平台>-v<VER>.<ext>，VER 即该来源版本号。
 #   • 手动同步项（无自动派生，改版本时须同步）：
 #       - apps/scanner/app/build.gradle.kts  versionCode/versionName
+#       - apps/sender-android/app/build.gradle.kts versionCode/versionName
 #       - apps/web/package.json               version
 #       - apps/windows/.../AssemblyInfo       版本
 #   • Android versionCode 需随版本递增（1.2.0 → 14），versionName 与 VER 一致。
@@ -172,6 +175,41 @@ build_scanner() {
   info "扫码端构建完成 → apps/scanner/app/build/outputs/apk/release/app-release.apk"
 }
 
+build_sender_android() {
+  info "构建 Android 分享发送端 ..."
+  local sdk_candidates=(
+    "${ANDROID_HOME:-}"
+    "${ANDROID_SDK_ROOT:-}"
+    "$HOME/Android/Sdk"
+    "$HOME/Library/Android/sdk"
+    "/opt/homebrew/share/android-commandlinetools"
+  )
+  local android_home=""
+  for p in "${sdk_candidates[@]}"; do
+    if [ -n "$p" ] && [ -d "$p/ndk" ]; then
+      android_home="$p"
+      break
+    fi
+  done
+  if [ -z "$android_home" ]; then
+    error "找不到 Android SDK（需含 ndk/ 子目录）。请设置 ANDROID_HOME 或 ANDROID_NDK_HOME 环境变量。"
+    return 1
+  fi
+  ANDROID_HOME="$android_home"
+  ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk}"
+  export ANDROID_HOME ANDROID_NDK_HOME
+  export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+
+  info "编译 Rust JNI 库 (core/transfer-engine --features jni → sender-android jniLibs/) ..."
+  cargo ndk -t arm64-v8a -o "$ROOT/apps/sender-android/app/src/main/jniLibs" \
+    build -p transfer-engine --features jni --release 2>&1 | tail -3
+  info "JNI 库编译完成 → apps/sender-android/app/src/main/jniLibs/arm64-v8a/libtransfer_engine.so"
+
+  cd "$ROOT/apps/sender-android"
+  ./gradlew :app:assembleDebug --stacktrace 2>&1 | tail -5 | while read -r line; do info "$line"; done
+  info "发送端 Debug APK → apps/sender-android/app/build/outputs/apk/debug/app-debug.apk"
+}
+
 build_windows() {
   info "构建 Windows 端 (WPF + Rust DLL + ZXing-C++ DLL) ..."
 
@@ -299,6 +337,7 @@ pack_dist() {
   mkdir -p "$ROOT/dist"
   # 清掉旧产物，避免新旧版本/命名混留（pem / keystore 不动）。
   rm -f "$ROOT/dist"/airferry-receiver-android-*.apk \
+        "$ROOT/dist"/airferry-sender-android-*.apk \
         "$ROOT/dist"/airferry-android-*.apk \
         "$ROOT/dist"/airferry-receiver-windows-*.zip \
         "$ROOT/dist"/airferry-windows-*.zip \
@@ -319,6 +358,16 @@ pack_dist() {
   verify_apk_signature "$apk_src"
   cp "$apk_src" "$ROOT/dist/airferry-receiver-android-arm64-v${VER}.apk"
   info "Android 接收端 → dist/airferry-receiver-android-arm64-v${VER}.apk"
+
+  # Android 分享发送端 APK（独立 applicationId；仅打包 release。缺失时 warn，
+  # 不中断扫码端打包。Debug 产物走 GitHub Actions artifact，不进 dist/。）
+  local sender_apk_src="$ROOT/apps/sender-android/app/build/outputs/apk/release/app-release.apk"
+  if [[ -f "$sender_apk_src" ]]; then
+    cp "$sender_apk_src" "$ROOT/dist/airferry-sender-android-arm64-v${VER}.apk"
+    info "Android 发送端 → dist/airferry-sender-android-arm64-v${VER}.apk"
+  else
+    warn "未找到 Android 发送端 release APK。Debug 请用 GitHub Actions android-scanner 的 airferry-sender-debug artifact。"
+  fi
 
   # Windows 端 zip（仅当已构建时打包——Windows 端须在 Windows 上构建）
   local win_publish="$ROOT/apps/windows/AirFerry.Windows/bin/x64/Release/net8.0-windows/win-x64/publish"
@@ -436,6 +485,9 @@ case "$TARGET" in
   scanner)
     build_scanner
     ;;
+  sender-android)
+    build_sender_android
+    ;;
   windows)
     build_windows
     ;;
@@ -457,7 +509,7 @@ case "$TARGET" in
     build_release
     ;;
   *)
-    echo "用法: $0 [all|sender|scanner|windows|web|wasm|dist|dist-upload-list|release]"
+    echo "用法: $0 [all|sender|scanner|sender-android|windows|web|wasm|dist|dist-upload-list|release]"
     echo "  windows 子命令须在 Windows + .NET 8 SDK + CMake/VS C++ 下运行（或用 scripts/build-windows.ps1）"
     echo "  dist-upload-list 打印可安全上传到 GitHub Release 的产物清单（排除 *.pem/*.keystore 密钥）"
     exit 1

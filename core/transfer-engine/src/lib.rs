@@ -29,9 +29,12 @@ pub mod assembler;
 pub mod descriptor;
 pub mod ingest_status;
 pub mod progress;
+pub mod qr_pack;
 pub mod receiver;
 pub mod resume;
 pub mod segment;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod send_prepare;
 pub mod sender;
 pub mod time;
 
@@ -56,9 +59,14 @@ pub mod cffi;
 pub use assembler::TransferAssembler;
 pub use descriptor::{DescriptorInfo, FileMeta};
 pub use progress::{Progress, Stats};
+pub use qr_pack::{
+    pack_next_qr, MAX_QR_SIDE, MAX_UI_QR_COUNT, QR_SCRATCH_BYTES,
+};
 pub use receiver::ReceiverSession;
 pub use resume::ResumeState;
 pub use segment::{SegmentMeta, MAX_SEGMENT_COUNT, SEGMENT_RAW_BYTES};
+#[cfg(not(target_arch = "wasm32"))]
+pub use send_prepare::{prepare_payload, PreparedPayload};
 pub use sender::{SenderConfig, SenderSession};
 
 // Re-export the wire-frame helpers so downstream code (tests, JNI host, the
@@ -98,6 +106,8 @@ pub enum Error {
     InvalidResume(&'static str),
     #[error("invalid large-transfer segment: {0}")]
     InvalidSegment(&'static str),
+    #[error("QR output buffer too small: need {need}, have {have}")]
+    QrBufferTooSmall { need: usize, have: usize },
 }
 
 pub(crate) type Result<T> = core::result::Result<T, Error>;

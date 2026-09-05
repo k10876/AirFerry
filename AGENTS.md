@@ -31,11 +31,15 @@ AirFerry/
 │   │   ├── src/main.tsx        #   薄入口：mount sender 的 App（options.tsx）
 │   │   ├── scripts/            #   prepare-wasm（锁定并复制 sender simd 包 + 拷 zstd）/ lzma 提取
 │   │   └── public/             #   wasm-zstd.wasm（worker 运行时 fetch，构建时拷入）
-│   ├── scanner/                # Android App（Kotlin + CameraX + ZXing-C++）
+│   ├── scanner/                # Android 扫码接收端（Kotlin + CameraX + ZXing-C++）
 │   │   └── app/src/main/
 │   │       ├── java/com/airferry/app/   # Kotlin
 │   │       ├── cpp/                     # ZXing-C++ JNI 桥（CMake）
 │   │       └── jniLibs/arm64-v8a/       # Rust .so（cargo-ndk 产物, git-ignored）
+│   ├── sender-android/         # Android 分享发送端（独立 APK，ACTION_SEND / SEND_MULTIPLE）
+│   │   └── app/src/main/
+│   │       ├── java/com/airferry/sender/  # Share 入口 / JNI 编码 / QR 播放
+│   │       └── jniLibs/arm64-v8a/         # 同一套 transfer_engine.so（git-ignored）
 │   └── windows/                # Windows App（C# WPF + OpenCvSharp + ZXing-C++）
 │       ├── native/                     #   Windows ZXing C ABI 包装器 + CMake
 │       ├── AirFerry.Windows/            #   主项目（Views/ViewModels/Models/Scan/Bundle/Native/Services/Themes；WPF-UI Fluent 主题）
@@ -139,6 +143,21 @@ adb install app/build/outputs/apk/release/app-release.apk
 > ZXing-C++（`libairferry_zxing.so`）由 Gradle 的 CMake 任务在首次 APK 构建时从 GitHub 拉取 v3.0.2 自动编译（需网络；缓存后离线可用）。
 > **16 KiB 页对齐**：Android 15+ 的 16 KiB 页设备会拒绝 `dlopen` 仅 4 KiB 对齐的 `.so`（表现：所有 QR 解码静默失败）。`cpp/CMakeLists.txt` 用 `-Wl,-z,max-page-size=16384` 强制对齐；Rust `.so` 由 cargo-ndk 默认对齐。验证：`llvm-readelf -l lib*.so | grep LOAD`（Align 列应为 `0x4000`）。
 
+### 2.3.1 Android 分享发送端（apps/sender-android）
+
+独立 APK（`applicationId com.airferry.sender`），出现在系统分享菜单，**不**打开扫码相机。无 ZXing / CMake，只链 `libtransfer_engine.so`。
+
+```bash
+cd apps/sender-android
+./gradlew :app:testDebugUnitTest   # JVM 协议单测（不加载 .so）
+./gradlew :app:assembleDebug       # 调试 APK（compileRustJni 自动 cargo-ndk）
+# 产物: app/build/outputs/apk/debug/app-debug.apk
+```
+
+> `compileRustJni` 把 `.so` 写到 `apps/sender-android/app/src/main/jniLibs/`（与扫码端目录分开，互不覆盖）。JNI 符号是 `Java_com_airferry_sender_nativelib_NativeBridge_*`（`senderCreate` / `senderNextQr` / `compressPrepare`），与扫码端的 `com.airferry.app.nativelib` 接收符号共存于同一 crate。
+> GitHub Actions：同一套 `.github/workflows/android-scanner.yml`（PR + `workflow_dispatch`）额外跑发送端单测并上传 `airferry-sender-debug` artifact。
+> 一键脚本：`./scripts/build-all.sh sender-android`。
+
 ### 2.4 Windows 扫码端（apps/windows）
 
 ```powershell
@@ -192,11 +211,12 @@ npm run preview        # 本地预览构建产物
 | `sender` | 双 wasm 产物 + 扩展 4 目标 | — |
 | `web` | 先 `npm run wasm` 重编 WASM + `build-fastzxing.sh --use-cache` 重编 FAST ZXing-C++，再 `npm run build`（apps/web，Vite 静态站点；`prebuild`→prepare-wasm 复制私有快照 + 拷 `wasm-zstd.wasm`/`zxing_reader.wasm`/`airferry_zxing.*`） | ✅（wasm 自动） |
 | `scanner` | `cargo ndk` 编译 `.so` → `./gradlew assembleRelease` | ✅ |
+| `sender-android` | `cargo ndk` 编译 `.so` → `./gradlew :app:assembleDebug`（分享发送端） | ✅ |
 | `windows` | Rust C ABI DLL + 共享 ZXing-C++ DLL → `dotnet build`（须 Windows） | ✅ |
 | `wasm` | 仅 `npm run wasm`（= build-wasm.cjs，产 legacy + simd 两份） | — |
 | `dist` | **仅打包**：把已构建的 `build/` + APK + Windows zip + web zip + 单文件版 html 复制/签名到 `dist/`（不重新构建） | — |
 | `dist-upload-list` | **仅打印**可安全上传到 GitHub Release 的当前版本产物清单（`airferry-*-v{VER}.` + 扩展名白名单，物理排除 `*.pem`/`*.keystore` 密钥）；不构建不打包，供 `gh release upload` 命令替换使用 | — |
-| `release` | `build_sender` → `build_web` → `build_scanner` → `pack_dist`（全量构建 + 打包） | ✅（scanner） |
+| `release` | `build_sender` → `build_web` → `build_scanner` → `pack_dist` | ✅（scanner） |
 
 ```bash
 ./scripts/build-all.sh              # 构建 sender + web + scanner（不打包）
@@ -205,7 +225,8 @@ npm run preview        # 本地预览构建产物
 ./scripts/build-all.sh dist-upload-list  # 打印可安全上传 Release 的产物清单（排除密钥）
 ./scripts/build-all.sh sender       # 仅浏览器端（含 WASM）
 ./scripts/build-all.sh web          # 仅网页端（须先有 apps/sender/wasm-pkg-simd/）
-./scripts/build-all.sh scanner      # 仅 APK
+./scripts/build-all.sh scanner      # 仅 Android 扫码端 APK
+./scripts/build-all.sh sender-android  # 仅 Android 分享发送端 Debug APK
 ./scripts/build-all.sh windows      # 仅 Windows 端（须 Windows + .NET 8 SDK + CMake/VS C++；首选 build-windows.ps1）
 ./scripts/build-all.sh wasm         # 仅 WASM
 ```
@@ -237,6 +258,7 @@ npm run preview        # 本地预览构建产物
 | `apps/web/dist/` | Vite 网页构建产物：`index.html` + `assets/`（JS/CSS/wasm/worker）+ 根目录 `wasm-zstd.wasm`。相对路径 `base:"./"`，可部署到任意子路径 | `npm run build` | ✅ |
 | `apps/scanner/app/build/` | Gradle/APK 构建产物：`outputs/apk/{debug,release}/app-*.apk` + native-debug-symbols + baselineProfiles | `./gradlew` | ✅ |
 | `apps/scanner/app/src/main/jniLibs/arm64-v8a/` | Rust 编译的 `libtransfer_engine.so`（唯一 native 库；旧的 `libet_code.so` 已清理，Kotlin 侧仅有 `System.loadLibrary("transfer_engine")` / `System.loadLibrary("airferry_zxing")`）。ZXing 的 `libairferry_zxing.so` 不在此处——由 CMake 在 APK 构建时直接编译进 APK | `cargo ndk ... build` | ✅ |
+| `apps/sender-android/app/src/main/jniLibs/arm64-v8a/` | 同一 crate 的 `libtransfer_engine.so`，含发送 JNI 符号；与扫码端目录分开 | `cargo ndk ... build`（sender-android `compileRustJni`） | ✅ |
 | `apps/windows/AirFerry.Windows/bin/` `obj/` | C# WPF 构建产物：`bin/x64/Release/net8.0-windows/win-x64/` + OpenCV/native DLLs | `dotnet build` / `dotnet publish` | ✅ |
 | `apps/windows/AirFerry.Windows/runtime/transfer_engine.dll` | Rust 编译的 C ABI DLL（`--features cffi`）；csproj 显式纳入 build/publish 并扁平复制到 exe 同目录，打包脚本再显式复制+核验 | `cargo build`（由 build-windows.ps1 拷入） | ✅ |
 | `apps/windows/AirFerry.Windows/runtime/airferry_zxing.dll` | Windows 对 Android v1.1.3 模式的 C ABI 等价实现；作为独立 native DLL 放在 exe 同目录，打包时显式复制+核验 | `cmake --build apps/windows/native/build`（由 build-windows.ps1 拷入） | ✅ |
@@ -250,7 +272,7 @@ npm run preview        # 本地预览构建产物
 
 发布归档统一格式 `airferry-{角色}-{平台及变体}-v{版本}.{扩展}`，**角色前缀进文件名**：
 
-- `sender` = **发送端**（浏览器扩展 / 网页）：把文件编成二维码视频流在屏幕上播放
+- `sender` = **发送端**（浏览器扩展 / 网页 / Android 分享 App）：把文件编成二维码视频流在屏幕上播放
 - `receiver` = **接收端**（Android / Windows App）：用摄像头 / 采集卡扫码恢复文件
 
 > **asset 不设 label**（Release 资产的「下载说明」字段留空，GitHub 页面直接显示文件名）。各端的用途、系统要求、架构、变体差异等**写在 Release notes 的产物表**（见各版 `docs/releases/v{VER}.md` 与 README 下载表）和文件名本身里，不重复进 label——文件名已含角色+平台+变体+版本，足够区分。
@@ -258,6 +280,7 @@ npm run preview        # 本地预览构建产物
 | 产物 | 命名格式 | 格式说明 |
 |------|---------|---------|
 | Android 接收端 APK | `airferry-receiver-android-arm64-v{VER}.apk` | **Android 扫码端**。arm64-v8a 单 ABI；Android 10+（minSdk 29）；安装后对准屏幕二维码即可接收。必须用 `apps/scanner/keystore.properties` 指向的 release keystore 签名；缺失时 release 构建失败，打包还会用 `apksigner` 拒绝 debug/无效签名 |
+| Android 发送端 APK | `airferry-sender-android-arm64-v{VER}.apk` | **Android 分享发送端**（独立 `com.airferry.sender`）。出现在系统 Share sheet；编码走同一套 JNI `transfer_engine`。Debug 由 `android-scanner.yml` 的 `airferry-sender-debug` artifact 产出；release 进 `dist/` 时 warn 跳过（尚未配发布签名则只产 debug） |
 | Windows 接收端 zip | `airferry-receiver-windows-x64-v{VER}.zip` | **Windows 扫码端**。x64 单架构；Windows 10+，需安装 .NET 8 Desktop Runtime；视频源支持摄像头 + USB/HDMI/SDI 采集卡 + 屏幕区域/独立窗口捕获（截图式选择器，见 §3.4）。`dotnet publish` 单文件 + 框架依赖；内含 `AirFerry.exe` + `transfer_engine.dll` + `airferry_zxing.dll` + OpenCV native DLLs。**只能在 Windows 上构建**（WPF TFM） |
 | Chrome MV3 | `airferry-sender-chrome-mv3-v{VER}.crx` + `.zip` | `.crx` = Cr24 签名格式（Chrome 96+/Edge 96+，现代 WASM externref）；`.zip` = 解压目录打包回退（`.crx` 被商店外安装拦截时用） |
 | Chrome MV2 | `airferry-sender-chrome-mv2-v{VER}.crx` + `.zip` | 同上，旧版浏览器兼容 |
@@ -306,7 +329,8 @@ npm run preview        # 本地预览构建产物
 4. **`dist` 子命令不重新构建**：它假设 `apps/sender/build/` 与 APK 已就绪（Windows zip 可选），只做复制/签名/打包。缺 sender/scanner 产物会 `error` 退出；缺 Windows 产物则 `warn` 跳过（因为 Windows 端只能在 Windows 上构建）。web 三件套（发送端/接收端 zip + 单文件版 html）同样 `warn` 模式：中间产物（`apps/web/dist*/`）在则从源重建，不在则跳过——**注意 `pack_dist` 开头清旧产物会删掉 `dist/` 里旧的单文件版 html**，所以单独跑 `dist` 前须保证 `apps/web/dist-standalone/index.html` 存在，否则单文件版会从发布清单消失。
 5. **版本号同步（发版必查）**：`build-all.sh` 的发布文件名版本取自 `apps/sender/package.json`；下列**全部**须同一版本号：
    - `apps/sender/package.json` `version` + `manifest.version`（→ 扩展/打包文件名）
-   - `apps/scanner/app/build.gradle.kts` `versionName`（+ 通常 `versionCode++`）（→ APK 内嵌）
+   - `apps/scanner/app/build.gradle.kts` `versionName`（+ 通常 `versionCode++`）（→ 扫码 APK 内嵌）
+   - `apps/sender-android/app/build.gradle.kts` `versionName`（+ 通常 `versionCode++`）（→ 发送 APK 内嵌）
    - `Cargo.toml` `[workspace.package] version`（→ 核心库）
    - `apps/windows/AirFerry.Windows/AirFerry.Windows.csproj` `<Version>`（→ exe 内嵌）
    - `apps/web/package.json` `version`（→ web 包自身版本）
@@ -356,7 +380,7 @@ npm run preview        # 本地预览构建产物
 | 大文件分段（descriptor v5，压缩后分段） | `core/transfer-engine/src/segment.rs` + `assembler.rs` | 逻辑传输整段压缩一次后按**压缩字节流**切成段；固定 `SEGMENT_RAW_BYTES = MAX_OBJECT_BYTES − MAX_SYMBOL_SIZE ≈ 31.9 MiB`、`MAX_SEGMENT_COUNT=131072`。104B v5 尾部携带 `root_sha256`（解压后原文摘要）+ `raw_sha256`（本段压缩字节摘要），强制 child id / 压缩流大小 / 段数 / 规范偏移 / 压缩长度 ≤ 规范切片。接收端按序拼接压缩段后**只解压一次**，再校验长度 + CRC32 + 根摘要；原生端用 `qr_protocol::compress::decompress_stream_to_file` **流式解压写盘**（bounded RAM，>256 MiB 超大文件可收）。`TransferAssembler` 仅是便利内存实现；Web 用 IndexedDB，Android/Windows 用磁盘 `.partial` |
 | 进度快照 | `core/transfer-engine/src/progress.rs` | `Progress` / `Stats` |
 | 断点状态序列化 | `core/transfer-engine/src/resume.rs` + `receiver.rs` | `ResumeState`（serde-gated JSON）；JSON 封顶 128 MiB，恢复前校验 OTI/坐标/预算；**只有带载荷的符号才可回放并计入 received**。descriptor 后为控内存不保存全部 decoder 输入，普通当前对象重启需重扫；大文件跨重启靠宿主“已完成段”账本 |
-| **JNI 绑定（Android）** | `core/transfer-engine/src/jni.rs` | `receiverIngest` 返回**packed jlong**（非 JSON，见 SPEC §7）；descriptor-v5 getter 含 `receiverRootSha256` / `receiverRawSha256`（WASM/C-ABI 同构） |
+| **JNI 绑定（Android）** | `core/transfer-engine/src/jni.rs` | 接收：`receiverIngest` 返回**packed jlong**（非 JSON，见 SPEC §7）；descriptor-v5 getter 含 `receiverRootSha256` / `receiverRawSha256`。发送：`Java_com_airferry_sender_nativelib_NativeBridge_*`（`senderCreate` / `senderCreateSegment` / `senderNextQr` / `compressPrepare` / `deriveSessionId`），QR 缓冲布局与 WASM `next_qr_scratch` 相同（`qr_pack.rs`） |
 | **C-ABI 绑定（Windows）** | `core/transfer-engine/src/cffi.rs` | 分段 getter 含 `airferry_receiver_root_sha256` / `airferry_receiver_raw_sha256`；Windows `NativeBridge.cs` + `ReceiverSession.cs` 对应转发 |
 | **C ABI 绑定（Windows/.NET P/Invoke）** | `core/transfer-engine/src/cffi.rs:106` | `airferry_receiver_ingest` 返回**packed u64**（位布局三端共享 `ingest_status.rs`）；assemble 用「Rust 分配+free」单次调用 |
 | **WASM 绑定（浏览器）** | `core/transfer-engine/src/wasm.rs` | **发送端** `SenderSessionWasm`：`next_qr` / `next_qr_multi` 为兼容 API；热路径用 `next_qr_scratch` 写入会话内固定缓冲，再用 `qr_scratch_view` 取得当帧 WASM 视图。**接收端** `ReceiverSessionWasm`（v1.1.6 新增，网页接收端用）：`from_descriptor`（校验完整帧 CRC+描述符 flag→锁定 session id→摄入使 meta confirmed）/ `new(sid_lo,sid_hi)` 缓存引导 / `ingest` 返回**packed u64**（位布局三端共享，见 §SPEC ingest 状态字）/ 元数据 getters（`file_name`/`original_size`/`compressed_size`/`compression`/`crc32`/`*_known`/`meta_confirmed`）/ `assemble_raw`（**只重组不解压**，JS 侧用 zstd/xz WASM 解压 + 校验 CRC32）/ `progress_json`。**不暴露 `assemble_result`**（wasm32 解压 fail-closed，见 §5 第10条） |
@@ -439,6 +463,17 @@ npm run preview        # 本地预览构建产物
 
 > 接收结果页 UI 约定：Detail/Text/Bundle 的「返回」独占首行，成功图标与完成提示放下一行；单文件/文件包页调用 Explorer 的按钮文案为「打开文件夹」（内部仍用 `ShareExport` 为 ContentStore blob 生成带逻辑文件名的临时导出）。
 
+### 3.4.1 Android 分享发送端
+
+| 关注点 | 位置 | 说明 |
+|--------|------|------|
+| Share 入口 | `apps/sender-android/.../ui/ShareActivity.kt` | `ACTION_SEND` / `SEND_MULTIPLE` / `text/plain`；`singleTop`；`onCreate`（先于 `setContent`）/`onNewIntent` 立刻把 URI 拷进 `filesDir/share-intake/`（OEM 会撤授权）。准备任务由 `encode/PreparationTask.kt` 使用 Activity `lifecycleScope` 托管，不能用 ReviewPane 的 composition scope；新输入/清除/销毁取消旧任务，generation + 取消检查防旧 JNI 结果启动播放或旧 finally 清掉新任务状态，取消异常不进错误 UI。JVM 回归 `PreparationTaskTest`，真机检查见 `docs/build-android.md` |
+| URI 拷贝 | `share/ShareIntake.kt` | `ContentResolver.openInputStream`；上限 256 MiB / 4096 项；空文件拒绝 |
+| ETBUNDL1 / ETTEXTv1 | `encode/BundleWriter.kt` + `encode/TextPayload.kt` | 字节级镜像 TS `bundle.ts` / `text.ts` |
+| 压缩 + 会话 | `encode/PrepareTransfer.kt` + JNI `compressPrepare` | 原生 zstd lv1 + 70% 阈值，xz 仅 ≤8 MiB；会话 ID 走 Rust `SessionId::derive` |
+| QR 播放 | `ui/QrPlayView.kt` | Choreographer 节流 fps；最近邻放大模块；`FLAG_KEEP_SCREEN_ON` + 屏幕亮度 1 |
+| JNI 桥 | `nativelib/NativeBridge.kt` | `com.airferry.sender` 包名；句柄非线程安全，只在播放回调线程调用 `senderNextQr` |
+
 ### 3.5 网页发送端
 
 > **功能与浏览器扩展（§3.2）完全一致**，**直接复用 `apps/sender/src/` 全部源码，无代码重复**。下表只列 web 端特有的接入点；业务逻辑（页面/组件/worker/wasm）见 §3.2。
@@ -484,6 +519,11 @@ npm run preview        # 本地预览构建产物
 | **`release`/`dist` 产物缺 web zip** | `apps/web/dist/` | `pack_dist` 用 warn 模式（非中断）：`apps/web/dist/` 缺失时跳过 web zip。先跑 `./scripts/build-all.sh web` 再 `dist`/`release` |
 | 扩展构建缺 WASM | `apps/sender/wasm-pkg-legacy/` 或 `wasm-pkg-simd/` | 单独跑 `npm run build:chrome-mv3` 等单目标脚本前忘了先 `npm run wasm`（双产物缺失） |
 | APK 缺 native 库 | `jniLibs/arm64-v8a/libtransfer_engine.so` | v1.2.0 起 Gradle `compileRustJni` 已自动前置，正常不会缺；若缺说明编译环境（cargo-ndk / NDK）有问题 |
+| 系统分享菜单没有 AirFerry 发送 | `apps/sender-android/.../AndroidManifest.xml` intent-filter | 须安装 **发送端** APK（`com.airferry.sender`），不是扫码端；`SEND`/`SEND_MULTIPLE` + `*/*` 与 `text/plain` |
+| 分享进来立即「无法读取文件」 | `ShareIntake.copyFromIntent` | URI 授权被 OEM 收回——必须在 `onCreate`/`onNewIntent` **立刻** `openInputStream` 拷贝，不能等用户点「开始发送」再读 |
+| Android 发送端点开始报 “The coroutine scope left the composition” | `ShareActivity.encodeAndPlay` + `PreparationTask` | ReviewPane 会因 `encoding=true` 离开 composition，不能在其 `rememberCoroutineScope` 中准备；必须用 Activity `lifecycleScope`，且新输入/销毁使旧任务失效。此错误本身不证明 Share 私有拷贝失败 |
+| Android 发送端点开始后黑屏/无码 | `QrPlayView` + `NativeBridge.senderNextQr` | 句柄为 0（`senderCreate` 失败）；或 `compileRustJni` 打进了只有 receiver 符号的旧 `.so`。看 logcat tag `airferry` |
+| Android 发送端压缩很慢 | `send_prepare.rs` | 正常路径是 zstd lv1；xz 只在 zstd 已压到 <70% **且** 原文 ≤8 MiB 时才跑 |
 | 安卓 >32 MiB 一直「正在同步」/ JNI 版本过旧 | `core/transfer-engine/src/jni.rs` `AIRFERRY_NATIVE_ABI_VERSION` + `NativeBridge.nativeAbiVersion()` | APK 内 `.so` 是旧版（缺 v5 分段符号）。v1.2.0 双防护：Gradle 自动重编 + 启动 ABI 握手拒绝旧库。设备上旧 APK 需卸载重装最新版 |
 | Windows 端 DllNotFoundException | `apps/windows/AirFerry.Windows/runtime/{transfer_engine,airferry_zxing}.dll` | 手动跑 `dotnet build` 而未经 `build-windows.ps1`；后者会自动构建、测试并复制 Rust 引擎与 ZXing-C++ 两个 DLL |
 | Windows 端 EntryPointNotFoundException | `apps/windows/AirFerry.Windows/Native/NativeBridge.cs` | `[DllImport]` 缺 `EntryPoint`：P/Invoke 默认按 PascalCase C# 方法名查找，但 Rust `cffi.rs` 导出的是 snake_case `airferry_*`。**首个 native 调用即抛**（热路径 `ReceiverIngest` → 扫第一个码就崩），CI 协议层单测测不到。修复：每个声明钉死 `EntryPoint = "airferry_receiver_ingest"` 等 |
@@ -510,7 +550,8 @@ npm run preview        # 本地预览构建产物
 2. **压缩参数（两端不同，勿混为一谈）**：
    - **浏览器发送端**（`apps/sender/src/wasm/compress.ts:55-64`）：Zstd **level 1**、Xz **level 9**、early-exit 阈值 **70%**（`e10079d`/`c2ae4a2` 提交已调；三算法选优 raw/zstd/xz）。
    - **Rust 核心库**（`core/qr-protocol/src/compress.rs:23,52`）：Zstd **level 22**（`DEFAULT_LEVEL`，:23）、Xz **level 6 + EXTREME**（`XZ_PRESET`，:52）；`compress_with` 在 :139、`decompress_with_limit` 在 :170。zstd 编码器窗口封顶 `ZSTD_WINDOW_LOG_MAX=23`（:81）——流式编码器不声明输入大小时高 level 会固定声明 windowLog=27，接收端解码器同样钳制 23，两端必须成对出现。
-   - 两套编码默认值不同是**有意的**：浏览器发送端追求启动快（Zstd Lv1），Rust 原生压缩 API 追求压缩率（Zstd Lv22；XZ Lv6+EXTREME，见 `compress.rs:41-49`）。接收端按标准流解压，不依赖编码级别。引用压缩参数时**必须分清 TS 与 Rust 默认值**，不要合并描述。
+   - **Android 分享发送端**（`core/transfer-engine/src/send_prepare.rs`）：Zstd **level 1**（与浏览器相同，Share 后要尽快出码）、70% early-exit；xz 仅当 zstd 已压到 <70% **且** 原文 ≤8 MiB（`XZ_MAX_INPUT`）时才跑，避免手机上对大文件跑 EXTREME xz。
+   - 两套编码默认值不同是**有意的**：浏览器 / Android 发送端追求启动快（Zstd Lv1），Rust 原生压缩 API 追求压缩率（Zstd Lv22；XZ Lv6+EXTREME，见 `compress.rs:41-49`）。接收端按标准流解压，不依赖编码级别。引用压缩参数时**必须分清 TS、Android 发送端与 Rust 默认值**，不要合并描述。
 
 3. **版本号/Release 混用（历史教训）**：README/dist/workflow 曾出现版本漂移。**当前权威版本 `1.2.8`**（versionCode=22）。v1.2.8 移除 Web WASM 的 SIMD 编译依赖，兼容禁用 WebAssembly SIMD 的加固/虚拟化 Chromium；构建目录名 `simd` 为兼容保留。v1.2.7 新增 Windows 持续接收模式与网页接收端屏幕/标签页捕获来源；v1.2.6 整理 Windows 接收结果页层级；v1.2.5 更新全平台图标并统一 Windows 扫描来源。协议仍为 v1.2.0 引入的 descriptor v5（compress-then-segment）。Windows workflow 已移除硬编码 `VER`，只能由现有 `release_tag` 派生并核对 tag commit；改版本时仍须按 §2.8 第 5 条同步代码中的版本源。
 
@@ -565,7 +606,7 @@ npm run preview        # 本地预览构建产物
 - **会话 ID**：FNV-1a 128-bit（name/size/mtime/指纹），确定性 → 断点恢复。Rust 与 TS 实现必须位一致。
 - **喷泉码发射**：源符号跨块轮询发一遍 → 持续新鲜修复符号（ESI 单调递增、不重复）；每块到 24 位 ESI 上限时明确停止，绝不回绕。进度近似线性，无 coupon-collector 拖尾。
 - **接收端安全生命线**：`panic = "abort"` 构建，任何 panic = 进程崩溃。`ObjectMeta::validate` + `decompress_with_limit` 是把恶意/越界输入挡在解码器前的防线。
-- **线程模型**：原生 receiver 句柄**非线程安全**。Android 用一把 `ingestLock` 串行化所有摄入；ZXing 解码在 N 个 worker 上并行。
+- **线程模型**：原生 receiver / sender 句柄**都非线程安全**。扫码端用一把 `ingestLock` 串行化摄入；发送端只在 Choreographer 回调线程调 `senderNextQr`。
 
 ---
 
