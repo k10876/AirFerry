@@ -467,7 +467,7 @@ npm run preview        # 本地预览构建产物
 
 | 关注点 | 位置 | 说明 |
 |--------|------|------|
-| Share 入口 | `apps/sender-android/.../ui/ShareActivity.kt` | `ACTION_SEND` / `SEND_MULTIPLE` / `text/plain`；`singleTop`；`onCreate`/`onNewIntent` 立刻把 URI 拷进 `filesDir/share-intake/`（OEM 会撤授权） |
+| Share 入口 | `apps/sender-android/.../ui/ShareActivity.kt` | `ACTION_SEND` / `SEND_MULTIPLE` / `text/plain`；`singleTop`；`onCreate`（先于 `setContent`）/`onNewIntent` 立刻把 URI 拷进 `filesDir/share-intake/`（OEM 会撤授权）。准备任务由 `encode/PreparationTask.kt` 使用 Activity `lifecycleScope` 托管，不能用 ReviewPane 的 composition scope；新输入/清除/销毁取消旧任务，generation + 取消检查防旧 JNI 结果启动播放或旧 finally 清掉新任务状态，取消异常不进错误 UI。JVM 回归 `PreparationTaskTest`，真机检查见 `docs/build-android.md` |
 | URI 拷贝 | `share/ShareIntake.kt` | `ContentResolver.openInputStream`；上限 256 MiB / 4096 项；空文件拒绝 |
 | ETBUNDL1 / ETTEXTv1 | `encode/BundleWriter.kt` + `encode/TextPayload.kt` | 字节级镜像 TS `bundle.ts` / `text.ts` |
 | 压缩 + 会话 | `encode/PrepareTransfer.kt` + JNI `compressPrepare` | 原生 zstd lv1 + 70% 阈值，xz 仅 ≤8 MiB；会话 ID 走 Rust `SessionId::derive` |
@@ -521,6 +521,7 @@ npm run preview        # 本地预览构建产物
 | APK 缺 native 库 | `jniLibs/arm64-v8a/libtransfer_engine.so` | v1.2.0 起 Gradle `compileRustJni` 已自动前置，正常不会缺；若缺说明编译环境（cargo-ndk / NDK）有问题 |
 | 系统分享菜单没有 AirFerry 发送 | `apps/sender-android/.../AndroidManifest.xml` intent-filter | 须安装 **发送端** APK（`com.airferry.sender`），不是扫码端；`SEND`/`SEND_MULTIPLE` + `*/*` 与 `text/plain` |
 | 分享进来立即「无法读取文件」 | `ShareIntake.copyFromIntent` | URI 授权被 OEM 收回——必须在 `onCreate`/`onNewIntent` **立刻** `openInputStream` 拷贝，不能等用户点「开始发送」再读 |
+| Android 发送端点开始报 “The coroutine scope left the composition” | `ShareActivity.encodeAndPlay` + `PreparationTask` | ReviewPane 会因 `encoding=true` 离开 composition，不能在其 `rememberCoroutineScope` 中准备；必须用 Activity `lifecycleScope`，且新输入/销毁使旧任务失效。此错误本身不证明 Share 私有拷贝失败 |
 | Android 发送端点开始后黑屏/无码 | `QrPlayView` + `NativeBridge.senderNextQr` | 句柄为 0（`senderCreate` 失败）；或 `compileRustJni` 打进了只有 receiver 符号的旧 `.so`。看 logcat tag `airferry` |
 | Android 发送端压缩很慢 | `send_prepare.rs` | 正常路径是 zstd lv1；xz 只在 zstd 已压到 <70% **且** 原文 ≤8 MiB 时才跑 |
 | 安卓 >32 MiB 一直「正在同步」/ JNI 版本过旧 | `core/transfer-engine/src/jni.rs` `AIRFERRY_NATIVE_ABI_VERSION` + `NativeBridge.nativeAbiVersion()` | APK 内 `.so` 是旧版（缺 v5 分段符号）。v1.2.0 双防护：Gradle 自动重编 + 启动 ABI 握手拒绝旧库。设备上旧 APK 需卸载重装最新版 |

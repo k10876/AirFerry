@@ -47,7 +47,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +56,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.lifecycleScope
+import com.airferry.sender.encode.PreparationTask
 import com.airferry.sender.encode.PrepareTransfer
 import com.airferry.sender.encode.SpeedPresets
 import com.airferry.sender.encode.TransferParams
@@ -66,7 +67,6 @@ import com.airferry.sender.share.ShareIntake
 import com.airferry.sender.share.StagedItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private val BgDark = Color(0xFF0F172A)
@@ -78,6 +78,7 @@ private val Danger = Color(0xFFEF4444)
 
 class ShareActivity : ComponentActivity() {
 
+    private val preparation by lazy { PreparationTask(lifecycleScope) }
     private val items = mutableStateListOf<StagedItem>()
     private var errorMsg by mutableStateOf<String?>(null)
     private var encoding by mutableStateOf(false)
@@ -108,12 +109,13 @@ class ShareActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         nativeError = checkNative()
         loadParams()
+        // Consume temporary URI grants before composing the first screen.
+        ingestIntent(intent)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent)) {
                 ShareRoot()
             }
         }
-        ingestIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -123,6 +125,7 @@ class ShareActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        preparation.cancel()
         destroyHandle()
         super.onDestroy()
     }
@@ -190,6 +193,9 @@ class ShareActivity : ComponentActivity() {
     }
 
     private fun stopPlayback() {
+        preparation.cancel()
+        encoding = false
+        plan = null
         playing = false
         destroyHandle()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -216,23 +222,23 @@ class ShareActivity : ComponentActivity() {
         window.attributes = lp
     }
 
-    private suspend fun encodeAndPlay() {
+    private fun encodeAndPlay() {
+        if (encoding) return
+        val snapshot = items.toList()
         encoding = true
         encodingLabel = "正在压缩并编码…"
         errorMsg = null
-        try {
-            val snapshot = items.toList()
-            val built = withContext(Dispatchers.Default) {
-                PrepareTransfer.run(snapshot)
-            }
-            plan = built
-            saveParams()
-            startPlayback(built, 0)
-        } catch (e: Exception) {
-            errorMsg = e.message ?: e.toString()
-        } finally {
-            encoding = false
-        }
+        preparation.start(
+            prepare = {
+                withContext(Dispatchers.Default) { PrepareTransfer.run(snapshot) }
+            },
+            onReady = { built ->
+                saveParams()
+                startPlayback(built, 0)
+            },
+            onError = { e -> errorMsg = e.message ?: e.toString() },
+            onFinished = { encoding = false }
+        )
     }
 
     @Composable
@@ -320,7 +326,6 @@ class ShareActivity : ComponentActivity() {
 
     @Composable
     private fun ReviewPane() {
-        val scope = rememberCoroutineScope()
         val total = items.sumOf { it.size }
         val selected = SpeedPresets.forSymbolSize(params.symbolSize) ?: SpeedPresets.DEFAULT
         Column(
@@ -399,7 +404,7 @@ class ShareActivity : ComponentActivity() {
             }
             Spacer(Modifier.height(8.dp))
             Button(
-                onClick = { scope.launch { encodeAndPlay() } },
+                onClick = { encodeAndPlay() },
                 enabled = !encoding,
                 colors = ButtonDefaults.buttonColors(containerColor = Accent),
                 modifier = Modifier.fillMaxWidth()

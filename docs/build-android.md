@@ -240,7 +240,7 @@ cat > local.properties <<EOF
 sdk.dir=/path/to/android-sdk
 EOF
 
-./gradlew :app:testDebugUnitTest   # BundleWriter / ETTEXTv1 / QrBuffer 等 JVM 单测
+./gradlew :app:testDebugUnitTest   # 协议 + PreparationTask 生命周期/取消 JVM 单测（不需 NDK）
 ./gradlew :app:assembleDebug       # compileRustJni → jniLibs → debug APK
 ```
 
@@ -249,3 +249,17 @@ EOF
 `ShareIntake` 在 Activity `onCreate` / `onNewIntent` **立刻**把 `EXTRA_STREAM` URI 拷到 `filesDir/share-intake/`，因为不少 OEM 在分享方切到后台后会收回临时授权。编码走 JNI `compressPrepare` + `senderCreate` / `senderNextQr`（缓冲布局与 WASM `next_qr_scratch` 相同）。上限：原文 256 MiB、4096 项；空文件拒绝。
 
 启动时同样握手 `nativeAbiVersion() >= 1`。句柄非线程安全，只在 `QrPlayView` 的 Choreographer 回调里调用 `senderNextQr`。
+
+### 准备任务的生命周期与分享排查
+
+- `ShareActivity.onCreate` 在 `setContent` **之前**完成分享拷贝；编码仍只读 `StagedItem.file`，不重新打开原 URI。
+- `PreparationTask` 使用 Activity 的 `lifecycleScope`，压缩在 `Dispatchers.Default` 执行。**不要**改为 `ReviewPane` 内的 `rememberCoroutineScope`：`encoding=true` 会让 ReviewPane 离开 composition 并取消任务，产生 “The coroutine scope left the composition”。
+- 新分享、文件选择结果、清除及销毁会取消旧准备任务；generation 守卫禁止旧结果/错误/`finally` 覆盖新任务状态。JNI 压缩不能中途打断，但返回后必须检查取消状态，不能启动旧播放。`CancellationException` 必须重抛，不显示为业务错误。
+- `PreparationTaskTest` 用虚拟时间覆盖 pane 离开、任务替换、不可中断旧任务、Activity 取消及真实错误；无需加载 JNI。
+
+真机回归（尤其 Xiaomi/HyperOS，JVM 测试不验证 OEM URI 授权）：
+
+1. 分别用应用内文件选择和系统 Share sheet 分享同一非空文件；点「开始发送」前，通过 debug APK 的 `adb shell run-as com.airferry.sender ls -lR files/share-intake` 确认私有副本和大小，再核对接收端恢复的字节。
+2. 准备页应切换为编码页，再进入二维码播放，不出现 composition 取消错误。
+3. 大文件编码期间再次分享另一文件，旧任务不得弹错或恢复旧文件播放；再发送应只播放新文件。编码期间退出/销毁 Activity 后也不得启动旧播放。
+4. 若只有系统分享失败，检查 `EXTRA_STREAM` / `clipData` 与读取授权；自行给收到的 Intent 加 `FLAG_GRANT_READ_URI_PERMISSION` **不能**补授已经丢失的权限。不要在编码时重新读取原 URI。
