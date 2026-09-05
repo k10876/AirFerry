@@ -4,8 +4,8 @@
 
 ```
         ┌────────────────────────────┐
-        │ 统一 pending 列表           │  添加文件（全页拖放/点选/文件夹，追加）
-        │ PendingItem[]              │  添加文字（弹窗 → 命名 .txt + content）
+        │ 统一 pending 列表           │  浏览器：添加文件/文件夹/文字
+        │ PendingItem[] / Share URI  │  Android 发送端：Share sheet URI，立刻拷贝到 app-private
         └────┬───────────────────────┘
              │ 用户点「发送」（此前不压缩、不跳页）
              ▼
@@ -18,9 +18,9 @@
      └───────┬────────┘
              ▼
                 ┌────────────────────┐
-                │ 三算法选优压缩      │  Raw / Zstd Lv1 / Xz Lv9
-                │ preparePayload     │  70% Zstd early-exit
-                │ (compress.worker)  │
+                │ 三算法选优压缩      │  浏览器：Raw / Zstd Lv1 / Xz Lv9（compress.worker）
+                │ preparePayload     │  Android 发送端：JNI send_prepare（zstd lv1，xz≤8MiB）
+                │                    │  70% Zstd early-exit
                 └────┬───────────────┘
                      ▼
               ┌──────────────┐

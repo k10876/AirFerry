@@ -8,9 +8,10 @@ AirFerry 是一个完全离线的光学文件传输系统。发送端（浏览�
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              发送端 (Browser Extension / Web)                     │
+│     发送端 (Browser Extension / Web / Android Share App)          │
 │  Chrome/Edge/Firefox · MV2 & MV3 · Plasmo + React + TS           │
 │  网页端 Vite 复用同一份 sender 源码                                │
+│  Android `apps/sender-android`：系统 Share sheet → JNI 编码 → QR │
 │                                                                  │
 │  统一列表（文件 + 文字）→ 显式「发送」→ [三算法选优压缩] → [Rust/WASM] │
 │    Raw / Zstd Lv1 / Xz Lv9（70% early-exit）                     │
@@ -48,7 +49,9 @@ core/
 │   ├── receiver       帧摄入 + 去重 + 解码 + 重组
 │   ├── descriptor     会话描述符帧（携带 OTI）
 │   ├── wasm.rs        wasm-bindgen（浏览器）
-│   ├── jni.rs         JNI（Android）
+│   ├── jni.rs         JNI（Android 扫码接收 + 分享发送）
+│   ├── qr_pack.rs     多码 QR 缓冲布局（WASM / JNI 发送共用）
+│   ├── send_prepare.rs 原生发送端压缩选优（非 wasm32）
 │   └── cffi.rs        C ABI（Windows P/Invoke）
 └── zxing-decoder/     Windows 对 Android v1.1.3 模式的 ZXing-C++ 实现
     ├── DecodeMultiFull / DecodeMultiRegions
@@ -70,11 +73,11 @@ core/
 ### 发送端
 
 ```
-统一 pending 列表（File + 文字 content）
-  │ 用户点「发送」才进入 worker
-  ├─ 恰好 1 条文字、0 文件 → ETTEXTv1（processText）
+统一 pending 列表（浏览器 File+文字 / Android Share URI 立刻拷贝）
+  │ 用户点「发送」才进入压缩
+  ├─ 恰好 1 条文字、0 文件 → ETTEXTv1
   ├─ 否则文字物化为命名 .txt + 文件 → ≥2 则 ETBUNDL1
-  ├─ 三算法选优压缩 (Raw / Zstd Lv1 / Xz Lv9)，70% early-exit
+  ├─ 压缩选优 (浏览器 Raw/Zstd Lv1/Xz Lv9；Android JNI zstd lv1，xz≤8MiB)，70% early-exit
   ├─ 整段压缩一次；压缩流 > ~32 MiB → 按 ~32 MiB 切压缩流段（文件/包/文字均可）
   ├─ 零填充到 symbol_size 整数倍
   ├─ RaptorQ 编码（RFC 6330 自动分源块）

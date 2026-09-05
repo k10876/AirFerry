@@ -1,5 +1,12 @@
 # Android 构建说明 (Android App Build)
 
+本页覆盖两个独立 APK：
+
+- **扫码接收端** `apps/scanner`（`com.airferry.app`）— CameraX + ZXing-C++ + JNI 接收
+- **分享发送端** `apps/sender-android`（`com.airferry.sender`）— 系统 Share sheet + JNI 编码 + 全屏 QR 播放，**无相机 / 无 ZXing**
+
+二者都通过 `cargo-ndk` 链同一份 `libtransfer_engine.so`，但写到各自的 `jniLibs/`，互不覆盖。
+
 ## 前置条件
 
 - JDK 17
@@ -222,3 +229,23 @@ cargo ndk -t arm64-v8a -t armeabi-v7a \
   -o apps/scanner/app/src/main/jniLibs \
   build -p transfer-engine --features jni --release
 ```
+
+## Android 分享发送端（apps/sender-android）
+
+独立应用，`applicationId = com.airferry.sender`，出现在系统分享菜单（`ACTION_SEND` / `ACTION_SEND_MULTIPLE` / `text/plain`）。不声明相机权限，不编译 ZXing。
+
+```bash
+cd apps/sender-android
+cat > local.properties <<EOF
+sdk.dir=/path/to/android-sdk
+EOF
+
+./gradlew :app:testDebugUnitTest   # BundleWriter / ETTEXTv1 / QrBuffer 等 JVM 单测
+./gradlew :app:assembleDebug       # compileRustJni → jniLibs → debug APK
+```
+
+产物：`app/build/outputs/apk/debug/app-debug.apk`。CI：`.github/workflows/android-scanner.yml`（job `build-sender-debug`，artifact `airferry-sender-debug`）。
+
+`ShareIntake` 在 Activity `onCreate` / `onNewIntent` **立刻**把 `EXTRA_STREAM` URI 拷到 `filesDir/share-intake/`，因为不少 OEM 在分享方切到后台后会收回临时授权。编码走 JNI `compressPrepare` + `senderCreate` / `senderNextQr`（缓冲布局与 WASM `next_qr_scratch` 相同）。上限：原文 256 MiB、4096 项；空文件拒绝。
+
+启动时同样握手 `nativeAbiVersion() >= 1`。句柄非线程安全，只在 `QrPlayView` 的 Choreographer 回调里调用 `senderNextQr`。

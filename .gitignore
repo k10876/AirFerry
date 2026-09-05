@@ -39,6 +39,14 @@ apps/scanner/keystore.properties
 apps/scanner/app/src/main/jniLibs/
 apps/scanner/app/.cxx/
 apps/scanner/captures/
+apps/sender-android/.gradle/
+apps/sender-android/build/
+apps/sender-android/app/build/
+apps/sender-android/local.properties
+apps/sender-android/keystore.properties
+apps/sender-android/app/src/main/jniLibs/
+apps/sender-android/app/.cxx/
+apps/sender-android/captures/
 *.apk
 *.aab
 *.keystore

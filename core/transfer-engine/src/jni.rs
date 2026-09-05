@@ -1,4 +1,4 @@
-//! Android JNI bindings for the receiver side.
+//! Android JNI bindings for the receiver **and** sender sides.
 //!
 //! Uses the official `jni` crate (correct JNIEnv ABI across all Android
 //! versions / vendors / ART implementations) with `extern "system"` — the
@@ -17,14 +17,20 @@
 
 #![cfg(feature = "jni")]
 
+use crate::descriptor::FileMeta;
 use crate::ingest_status;
+use crate::qr_pack::{self, QR_SCRATCH_BYTES};
 use crate::receiver::ReceiverSession;
+use crate::segment::SegmentMeta;
+use crate::sender::{SenderConfig, SenderSession};
 use crate::Progress;
 use jni::objects::{JByteArray, JClass, JString};
-use jni::sys::{jboolean, jint, jlong, jsize};
+use jni::sys::{jboolean, jint, jlong, jlongArray, jsize};
 use jni::JNIEnv;
 use qr_protocol::frame::SessionIdRaw;
-use raptorq_core::MAX_ORIGINAL_BYTES;
+use qr_protocol::SessionId;
+use raptorq_core::{Config, MAX_ORIGINAL_BYTES};
+use sha2::{Digest, Sha256};
 
 /// ABI / protocol capability version of this JNI library.
 ///
@@ -841,4 +847,419 @@ fn android_log(msg: &str) {
 #[cfg(not(target_os = "android"))]
 fn android_log(msg: &str) {
     eprintln!("[airferry] {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// Sender JNI (`com.airferry.sender.nativelib.NativeBridge`)
+//
+// The scanner APK keeps using `com.airferry.app.nativelib.NativeBridge` for
+// receive. The Share-sheet sender is a separate applicationId, so these
+// symbols are named for its own Kotlin class. Both apps load the same
+// `libtransfer_engine.so`; unused exports are harmless.
+// ---------------------------------------------------------------------------
+
+fn throw_illegal(env: &mut JNIEnv, msg: &str) {
+    let _ = env.throw_new("java/lang/IllegalArgumentException", msg);
+}
+
+fn jstr(env: &mut JNIEnv, s: &JString) -> Option<String> {
+    env.get_string(s).ok().map(|j| j.into())
+}
+
+fn bytes_or_throw(env: &mut JNIEnv, arr: &JByteArray, what: &str) -> Option<Vec<u8>> {
+    match env.convert_byte_array(arr) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            throw_illegal(env, &format!("failed to read {what}"));
+            None
+        }
+    }
+}
+
+fn sender_from_handle<'a>(handle: jlong) -> Option<&'a mut SenderSession> {
+    if handle == 0 {
+        return None;
+    }
+    Some(unsafe { &mut *(handle as *mut SenderSession) })
+}
+
+fn file_meta(
+    filename: String,
+    original_size: u64,
+    crc32: u32,
+    compression: u8,
+    compressed_size: u64,
+) -> FileMeta {
+    FileMeta {
+        filename,
+        original_size,
+        crc32,
+        compression,
+        compressed_size,
+        compressed_size_known: true,
+        crc32_known: true,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_nativeAbiVersion(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    AIRFERRY_NATIVE_ABI_VERSION
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_segmentRawBytes(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jlong {
+    crate::SEGMENT_RAW_BYTES as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_qrScratchBytes(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    QR_SCRATCH_BYTES as jint
+}
+
+/// FNV-1a 64 content fingerprint over head||tail. Returns 8 LE bytes.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_contentFingerprint(
+    mut env: JNIEnv,
+    _class: JClass,
+    head: JByteArray,
+    tail: JByteArray,
+) -> jni::sys::jbyteArray {
+    let head = match bytes_or_throw(&mut env, &head, "fingerprint head") {
+        Some(v) => v,
+        None => return null_byte_array(&mut env),
+    };
+    let tail = match bytes_or_throw(&mut env, &tail, "fingerprint tail") {
+        Some(v) => v,
+        None => return null_byte_array(&mut env),
+    };
+    let fp = qr_protocol::session::content_fingerprint(&head, &tail);
+    fill_array(&mut env, &fp)
+}
+
+/// FNV-1a 128 session id. Returns `long[2] = {lo, hi}` (unsigned bits).
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_deriveSessionId(
+    mut env: JNIEnv,
+    _class: JClass,
+    name: JString,
+    size: jlong,
+    mtime_ms: jlong,
+    fingerprint: JByteArray,
+) -> jlongArray {
+    let name = match jstr(&mut env, &name) {
+        Some(s) => s,
+        None => {
+            throw_illegal(&mut env, "deriveSessionId: missing name");
+            return std::ptr::null_mut();
+        }
+    };
+    let fp = match bytes_or_throw(&mut env, &fingerprint, "fingerprint") {
+        Some(v) => v,
+        None => return std::ptr::null_mut(),
+    };
+    let sid = SessionId::derive(&name, size as u64, mtime_ms as u64, &fp);
+    let lo = sid.0 as u64 as i64;
+    let hi = (sid.0 >> 64) as u64 as i64;
+    match env.new_long_array(2) {
+        Ok(arr) => {
+            if env.set_long_array_region(&arr, 0, &[lo, hi]).is_ok() {
+                arr.into_raw()
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_sha256(
+    mut env: JNIEnv,
+    _class: JClass,
+    data: JByteArray,
+) -> jni::sys::jbyteArray {
+    let data = match bytes_or_throw(&mut env, &data, "sha256 input") {
+        Some(v) => v,
+        None => return null_byte_array(&mut env),
+    };
+    let digest = Sha256::digest(&data);
+    fill_array(&mut env, &digest)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_crc32(
+    mut env: JNIEnv,
+    _class: JClass,
+    data: JByteArray,
+) -> jlong {
+    let data = match bytes_or_throw(&mut env, &data, "crc32 input") {
+        Some(v) => v,
+        None => return 0,
+    };
+    crc32fast::hash(&data) as u32 as i64
+}
+
+/// Compress + CRC. Packed result:
+/// `[u8 algorithm][u32le crc32_of_original][compressed bytes]`.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_compressPrepare(
+    mut env: JNIEnv,
+    _class: JClass,
+    raw: JByteArray,
+) -> jni::sys::jbyteArray {
+    let raw = match bytes_or_throw(&mut env, &raw, "compress input") {
+        Some(v) => v,
+        None => return null_byte_array(&mut env),
+    };
+    let prepared = match crate::send_prepare::prepare_payload(&raw) {
+        Ok(p) => p,
+        Err(e) => {
+            android_log(&format!("compressPrepare failed: {e}"));
+            throw_illegal(&mut env, &format!("compress failed: {e}"));
+            return null_byte_array(&mut env);
+        }
+    };
+    let mut out = Vec::with_capacity(5 + prepared.compressed.len());
+    out.push(prepared.algorithm);
+    out.extend_from_slice(&prepared.crc32.to_le_bytes());
+    out.extend_from_slice(&prepared.compressed);
+    fill_array(&mut env, &out)
+}
+
+fn sender_config(env: &mut JNIEnv, redundancy_pct: jint, symbol_size: jint) -> Option<SenderConfig> {
+    if !(5..=50).contains(&redundancy_pct) {
+        throw_illegal(env, "redundancyPct must be 5..=50");
+        return None;
+    }
+    let codec = match Config::new(symbol_size as u32) {
+        Ok(c) => c,
+        Err(e) => {
+            throw_illegal(env, &format!("invalid symbolSize: {e}"));
+            return None;
+        }
+    };
+    Some(SenderConfig {
+        codec,
+        redundancy_pct: redundancy_pct as u8,
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_senderCreate(
+    mut env: JNIEnv,
+    _class: JClass,
+    compressed_payload: JByteArray,
+    session_id_lo: jlong,
+    session_id_hi: jlong,
+    redundancy_pct: jint,
+    symbol_size: jint,
+    filename: JString,
+    original_file_size: jlong,
+    crc32: jlong,
+    compression: jint,
+) -> jlong {
+    let payload = match bytes_or_throw(&mut env, &compressed_payload, "compressed payload") {
+        Some(v) => v,
+        None => return 0,
+    };
+    let filename = match jstr(&mut env, &filename) {
+        Some(s) => s,
+        None => {
+            throw_illegal(&mut env, "senderCreate: missing filename");
+            return 0;
+        }
+    };
+    let cfg = match sender_config(&mut env, redundancy_pct, symbol_size) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let sid = SessionId(((session_id_hi as u64 as u128) << 64) | (session_id_lo as u64 as u128));
+    let fm = file_meta(
+        filename,
+        original_file_size as u64,
+        crc32 as u32,
+        compression as u8,
+        payload.len() as u64,
+    );
+    match SenderSession::new(&payload, sid, cfg, fm) {
+        Ok(session) => Box::into_raw(Box::new(session)) as jlong,
+        Err(e) => {
+            android_log(&format!("senderCreate failed: {e}"));
+            throw_illegal(&mut env, &format!("senderCreate: {e}"));
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_senderCreateSegment(
+    mut env: JNIEnv,
+    _class: JClass,
+    compressed_payload: JByteArray,
+    root_session_id_lo: jlong,
+    root_session_id_hi: jlong,
+    segment_index: jint,
+    segment_count: jint,
+    original_offset: jlong,
+    root_original_size: jlong,
+    root_sha256: JByteArray,
+    raw_sha256: JByteArray,
+    redundancy_pct: jint,
+    symbol_size: jint,
+    filename: JString,
+    original_size: jlong,
+    crc32: jlong,
+    compression: jint,
+) -> jlong {
+    let payload = match bytes_or_throw(&mut env, &compressed_payload, "segment payload") {
+        Some(v) => v,
+        None => return 0,
+    };
+    let filename = match jstr(&mut env, &filename) {
+        Some(s) => s,
+        None => {
+            throw_illegal(&mut env, "senderCreateSegment: missing filename");
+            return 0;
+        }
+    };
+    let root_sha = match bytes_or_throw(&mut env, &root_sha256, "root_sha256") {
+        Some(v) => v,
+        None => return 0,
+    };
+    let raw_sha = match bytes_or_throw(&mut env, &raw_sha256, "raw_sha256") {
+        Some(v) => v,
+        None => return 0,
+    };
+    if root_sha.len() != 32 || raw_sha.len() != 32 {
+        throw_illegal(&mut env, "root_sha256 and raw_sha256 must be 32 bytes");
+        return 0;
+    }
+    let cfg = match sender_config(&mut env, redundancy_pct, symbol_size) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let root = ((root_session_id_hi as u64 as u128) << 64) | (root_session_id_lo as u64 as u128);
+    let child = SessionId::derive_segment(root, segment_index as u32);
+    let fm = file_meta(
+        filename,
+        original_size as u64,
+        crc32 as u32,
+        compression as u8,
+        payload.len() as u64,
+    );
+    let mut root_arr = [0u8; 32];
+    root_arr.copy_from_slice(&root_sha[..32]);
+    let mut raw_arr = [0u8; 32];
+    raw_arr.copy_from_slice(&raw_sha[..32]);
+    let segment_meta = SegmentMeta {
+        root_session_id: root,
+        segment_index: segment_index as u32,
+        segment_count: segment_count as u32,
+        original_offset: original_offset as u64,
+        root_original_size: root_original_size as u64,
+        root_sha256: root_arr,
+        raw_sha256: raw_arr,
+    };
+    match SenderSession::new_segment(&payload, child, cfg, fm, segment_meta) {
+        Ok(session) => Box::into_raw(Box::new(session)) as jlong,
+        Err(e) => {
+            android_log(&format!("senderCreateSegment failed: {e}"));
+            throw_illegal(&mut env, &format!("senderCreateSegment: {e}"));
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_senderDestroy(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle != 0 {
+        unsafe { drop(Box::from_raw(handle as *mut SenderSession)) };
+    }
+}
+
+/// Next `count` QR matrices, packed like WASM `next_qr_scratch`.
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_senderNextQr(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    count: jint,
+) -> jni::sys::jbyteArray {
+    let session = match sender_from_handle(handle) {
+        Some(s) => s,
+        None => {
+            throw_illegal(&mut env, "senderNextQr: null handle");
+            return null_byte_array(&mut env);
+        }
+    };
+    let mut buf = vec![0u8; QR_SCRATCH_BYTES];
+    match qr_pack::pack_next_qr(session, count.max(0) as u32, &mut buf) {
+        Ok(written) => fill_array(&mut env, &buf[..written as usize]),
+        Err(e) => {
+            android_log(&format!("senderNextQr failed: {e}"));
+            throw_illegal(&mut env, &format!("senderNextQr: {e}"));
+            null_byte_array(&mut env)
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_senderTotalSymbols(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jint {
+    match sender_from_handle(handle) {
+        Some(s) => s.total_k() as jint,
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_senderIsSegmented(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jint {
+    match sender_from_handle(handle) {
+        Some(s) => s.segment_meta().is_some() as jint,
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_airferry_sender_nativelib_NativeBridge_senderStatsJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jni::sys::jbyteArray {
+    let session = match sender_from_handle(handle) {
+        Some(s) => s,
+        None => return null_byte_array(&mut env),
+    };
+    let s = session.stats();
+    let json = format!(
+        r#"{{"bytes":{},"frames":{},"elapsed_ms":{},"fps":{:.4},"throughput_bps":{:.4}}}"#,
+        s.bytes,
+        s.frames,
+        s.elapsed_ms,
+        s.fps(),
+        s.throughput_bps(),
+    );
+    let mut buf = json.into_bytes();
+    buf.push(0);
+    fill_array(&mut env, &buf)
 }

@@ -6,7 +6,7 @@
 
 > 🤖 **AI 代理/新开发者**：先读 [AGENTS.md](AGENTS.md)（构建命令、代码导航、调试速查、文档与代码偏差清单）。跨端线格式的位级权威定义见 [docs/SPEC.md](docs/SPEC.md)。
 
-- **发送端**：浏览器扩展（Chrome / Edge / Firefox，支持 MV2 与 MV3）· **网页端**（[在线版](#网页端-web-发送接收)）
+- **发送端**：浏览器扩展（Chrome / Edge / Firefox，支持 MV2 与 MV3）· **网页端**（[在线版](#网页端-web-发送接收)）· **Android 分享发送端**（系统 Share sheet）
 - **接收端**：Android 原生 App · Windows 桌面应用（WPF）· **网页接收端**（[在线版](#网页端-web-发送接收)）
 - **核心库**：Rust，同时编译为 **WebAssembly**（浏览器插件）、**Android Native Library**（JNI）、**Windows DLL**（C ABI，P/Invoke），保证三端编解码逻辑完全一致
 
@@ -69,6 +69,7 @@
 | `airferry-sender-web-standalone-v1.2.8.html` | 网页发送端单文件版（约 2MB，双击即用，无需服务器） |
 | `airferry-receiver-web-v1.2.8.zip` | **网页接收端**：需部署到 HTTPS / localhost 后使用摄像头（官方在线版见[网页端](#网页端web-发送--接收)） |
 | `airferry-receiver-android-arm64-v1.2.8.apk` | **Android 扫码端**：arm64-v8a，Android 10+，使用固定 release keystore 签名 |
+| Android 分享发送端 | 独立 APK `com.airferry.sender`（`apps/sender-android`）。从其他 App 分享文件/文字后全屏播放二维码；Debug 由 GitHub Actions `android-scanner` workflow 的 `airferry-sender-debug` artifact 产出。与扫码端不是同一个应用 |
 | `airferry-receiver-windows-x64-v1.2.8.zip` | **Windows 扫码端**：x64，Windows 10+，视频源支持摄像头 + USB/HDMI/SDI 采集卡 + 屏幕区域/窗口捕获 |
 
 > 发送端/APK/web 由 `./scripts/build-all.sh release` 产出；版本号取自 `apps/sender/package.json`。Windows zip 默认由 GitHub Actions `windows` workflow（`workflow_dispatch`）上传到同一 Release。Chrome `.crx` 需本机有 Chrome 才能签名，否则仅产出 `.zip`。web 发送端/接收端由 GitHub Actions `pages` workflow 自动构建并部署到 GitHub Pages（推送 `main` 即触发）。
@@ -76,6 +77,10 @@
 ### Android 接收端
 
 下载 APK，允许「未知来源」后安装到 Android 10+ 设备（已用 release keystore 签名）。
+
+### Android 发送端
+
+另装分享发送端（`AirFerry 发送`）。在文件管理器 / 相册 / 聊天里点「分享」→「AirFerry 发送」，把手机屏幕对准另一台设备上的扫码端即可。不占用相机权限。
 
 ### Windows 接收端
 
