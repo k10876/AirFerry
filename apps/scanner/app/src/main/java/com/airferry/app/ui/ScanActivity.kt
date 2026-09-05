@@ -3,17 +3,14 @@ package com.airferry.app.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.hardware.camera2.CaptureRequest
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
 import android.util.Log
-import android.util.Range
 import android.util.Size
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -453,7 +450,6 @@ class ScanActivity : ComponentActivity() {
         return p
     }
 
-    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
     private fun startCameraWithView(previewView: PreviewView) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
@@ -483,37 +479,20 @@ class ScanActivity : ComponentActivity() {
                     )
                     .build()
 
-                fun buildAnalysis(fpsRange: Range<Int>): ImageAnalysis =
-                    ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setResolutionSelector(resolutionSelector)
-                        .also { builder ->
-                            // Pin the sensor frame-rate via Camera2Interop (CameraX
-                            // 1.3.x has no public ImageAnalysis#setTargetFrameRate).
-                            Camera2Interop.Extender(builder).setCaptureRequestOption(
-                                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                                fpsRange
-                            )
-                        }
-                        .build()
-                        .also { it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(pool)) }
+                // Do not force AE target FPS. On Xiaomi 13 / HyperOS China, pinning
+                // [60,60] makes the HAL configure "FPS: 60 ~ 60" then fatal with
+                // CAMERA_ERROR — black preview, zero analysis frames — while the
+                // bind try/catch never runs (async device error after bind).
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setResolutionSelector(resolutionSelector)
+                    .build()
+                    .also { it.setAnalyzer(cameraExecutor, QrStreamAnalyzer(pool)) }
 
-                // Pin a steady 60fps so low-light AE can't trade frame rate for a
-                // longer exposure (the on-screen QR is a bright emissive source, so
-                // a fixed 60 is usually fine and reduces motion / rolling-shutter
-                // smear). Some devices reject a fixed [60,60]; fall back to [30,60].
                 cameraProvider.unbindAll()
-                try {
-                    cameraProvider.bindToLifecycle(
-                        this, CameraSelector.DEFAULT_BACK_CAMERA, preview, buildAnalysis(Range(60, 60))
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "fixed 60fps bind failed; falling back to 30–60", e)
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        this, CameraSelector.DEFAULT_BACK_CAMERA, preview, buildAnalysis(Range(30, 60))
-                    )
-                }
+                cameraProvider.bindToLifecycle(
+                    this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Camera bind failed", e)
                 cameraStarted = false
